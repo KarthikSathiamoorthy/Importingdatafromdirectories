@@ -1,0 +1,371 @@
+Option Public
+Option Declare
+Type RecType
+	ML As String
+	PL As String
+	MLS As String
+	BU As String
+End Type    
+Dim pathfilenameBackupNew As String
+Dim myLog As c_Log
+Dim Sep As String
+
+Sub Initialize
+	
+	' It checks for a CSV file at the configured location and processes requests as per the requirement
+	' CSV file includes only those requests which are in specific Status
+	' After Process is completed, CSV files are backedup in the the Backup Directory
+	
+	On Error Goto error_handling
+	
+	Dim i As Integer
+	Dim oDoc As notesdocument
+	Dim oSession As New NotesSession
+	Dim oDB As NotesDatabase
+	Dim countRecs As Integer
+	Dim countProcs As Integer
+	Dim countSkips As Integer
+	Dim countMisses As Integer
+	Dim arrayOfRecs() As RecType	
+	Dim sErrMsg As String
+	Dim pathfilenameBackup As String
+	Dim pathfilenameBackupNew As String
+	Dim fileNum As Integer
+	Dim rtItem As notesRichTextItem
+	Dim arrFilenames() As String
+	Dim Anzfiles As Integer
+	Dim PosFileName  As Integer
+	Dim PathName As String
+	Dim BackupPathName As String
+	Dim FilePathName As String
+	Dim FileSearch As String
+	Dim iSave As Integer
+	
+	Dim servernameArchiv As String
+	Dim pathnameArchiv As String
+	Dim oProfileDoc As NotesDocument
+	Dim oView As NotesView
+	Dim strSearchString As String
+	Dim oColl As NotesDocumentCollection
+	
+	Dim srcMLNumber As String
+	Dim srcPLNumber As String
+	Dim subStatus As String
+	Dim agStatus As Integer 
+	Dim CurrPathAvailable As Boolean
+	Dim BackupPathAvailable As Boolean
+	
+	
+	
+	agStatus = 0   ' For specific purpose
+	
+	' Get Current Database Details and validate it
+	Set oDb = oSession.CurrentDatabase
+
+	If oDb Is Nothing Then
+		MessageBox "Database hasn't been opened yet"
+		Exit Sub
+	End If
+	
+	' Get Path details from the profile document
+	Set oProfileDoc = oDb.GetProfileDocument("frmProfileDB")
+	servernameArchiv = oProfileDoc.GetItemValue("fldArchivDBServer")(0)
+	pathnameArchiv = oProfileDoc.GetItemValue("fldArchivDBPath")(0)
+
+	' In case this is archive DB, don't run the job
+	If oDb.FilePath = pathnameArchiv Then
+		MessageBox "Agent cannot run as this is triggerred from an archive database"
+		Exit Sub
+	End If
+	
+		
+	iSave=0
+	Anzfiles = 0
+	' Get import directory, backup directory and file name. and Validate them
+	PathName = GetPathName()	
+	FileSearch = GetFileName()
+	BackupPathName = GetBackupPathname()
+	
+	If PathName ="" Or FileSearch = "" Or BackupPathName = "" Then
+		Call myLog.addLog(sep)
+		Call myLog.addLog("Directory, Backup File Path or Import File name is not configured")
+		GoTo ende
+	Else
+		CurrPathAvailable = DirExists(PathName)
+		BackupPathAvailable = DirExists(BackupPathName)
+		If Not CurrPathAvailable Then
+			Call myLog.addLog(sep)
+			Call myLog.addLog("Directory Path doesn't exist")
+			GoTo ende
+		End If
+		If Not BackupPathAvailable Then
+			Call myLog.addLog(sep)
+			Call myLog.addLog("Backup Directory Path doesn't exist")
+			GoTo ende
+		End If
+	End If
+	
+	Call GetFilenamesAll(FileSearch,arrFilenames(),Anzfiles)
+	
+	If Anzfiles = 0 Then
+		
+		GoTo ende
+	End If
+	
+	' Go to the view in which the data from the csv file should be imported. 
+	Set oView = oDb.GetView("vwAllview")
+	
+	For PosFileName=0 To Anzfiles-1
+		agStatus = 1  ' This means all file related validations are passed and file do exist
+		
+		countProcs = 0  ' Number of docs processed\updated
+		countMisses = 0 ' Number of docs not found
+		countSkips = 0  ' Number of docs found, but skipped or not updated
+		
+		FilePathName = PathName + arrFilenames(PosFileName)
+		
+		
+		If  ReadFileAndFillFieldArray(countRecs,arrayOfRecs(),FilePathName) Then
+			agStatus = 2 ' This would mean that we are processing a file 
+			
+			sErrMsg = ""
+			
+			If countRecs = 0 Then
+				countRecs = 1   'To correctly log the value, in case of an empty record. Else it would be -1
+			End If
+			
+			For i = 1 To countRecs-1
+				srcMLNumber = Right("000000000000000000" + CStr(arrayOfRecs(i).ML), 18)
+				'------------------------
+				srcPLNumber = Right("0000" + CStr(arrayOfRecs(i).PL), 4) 
+			
+		
+				strSearchString =  srcMLNumber & "#" & srcPLNumber  				
+				Set oColl = oView.GetAllDocumentsByKey(strSearchString)
+				subStatus = ""
+				If oColl.Count = 0 Then
+					
+					countMisses = countMisses + 1
+				Else
+					Set oDoc = oColl.Getfirstdocument()
+					' Ideally there should be just one doc, but in case there are multiple
+					While Not oDoc Is Nothing
+						If oDoc.fldStatus(0) = "In Process" ‘if the document status is checked and based on it if it is updated.
+		countSkips = countSkips + 1
+						Else
+							oDoc.fldStatus = "In Process"
+							
+							Call oDoc.Computewithform(False,False)
+							Call oDoc.Save(True,False)
+														
+							subStatus = CheckTriggerStatus( oDb,oDoc)
+							If subStatus <> "Success" Then
+								Call myLog.addLog(subStatus)
+							Else
+								subStatus = ArchivingChanges(oSession, oDoc)
+								If subStatus <> "Success" Then
+																	End If
+							End if	
+							countProcs = countProcs + 1
+						End If
+						Set oDoc = oColl.Getnextdocument(oDoc)
+					Wend
+				End If
+				iSave =iSave +1
+			Next
+			
+			
+			ResumeError: 		
+			agStatus = 3
+			If Anzfiles > 0 Then
+				'Copy the file to backup directory 
+				pathfilenameBackup = BackupPathName+ arrFilenames(PosFileName)
+				FileCopy FilePathName, pathfilenameBackup
+				
+				'Rename back-up file
+				pathfilenameBackupNew = BackupPathName+ GetBackupFileName(arrFilenames(PosFileName))
+				Name pathfilenameBackup As pathfilenameBackupNew
+				
+				
+				
+				'Clear import file
+				Kill FilePathName
+				
+				'Creating new import file as an empty file with the same name
+				
+			End If 
+			agStatus = 2
+		End If
+		agStatus = 1
+			Next
+	agStatus = 0
+	
+ende:
+	
+	Exit Sub
+	
+error_handling:
+	
+	If agStatus = 0 Or agStatus = 3 Then
+		Resume ende
+	Else 
+		Resume ResumeError
+	End If
+End Sub
+Function GetPathName() As String
+	Dim oSession As New NotesSession
+	Dim oDB As NotesDatabase
+	Dim oProfileDoc As NotesDocument
+	
+	Dim pathname As String
+	
+	Set oDb = oSession.CurrentDatabase
+	Set oProfileDoc = oDb.GetProfileDocument("frmProfileDB")
+	
+	pathname = oProfileDoc.GetItemValue("fldDirS")(0)
+	
+	GetPathName = pathname
+End Function
+
+Function DirExists(PathName As String) As Boolean
+	On Error GoTo ErrorHandler
+	DirExists = False
+	Dim DirResult As String
+	DirResult = Dir$(PathName, 16)
+	If DirResult <> "" Then
+		DirExists = True
+	End If
+	Exit Function
+	
+ErrorHandler:
+	DirExists = False
+	Resume Next
+End Function
+Function GetFilenamesAll(PathName As String, arrFilenames() As String,Anzfiles As Integer) 
+	Dim fileName As String
+	
+	Anzfiles=0
+	
+	fileName$ = Dir$(PathName$, 0)
+	
+	Do While fileName$ <> ""
+		Redim Preserve arrFilenames(Anzfiles) 
+		arrFilenames(Anzfiles) =  fileName$
+		fileName$ = Dir$()
+	'	
+		Anzfiles=Anzfiles+1
+	Loop
+	
+End Function
+Function GetFileName() As String
+	Dim oSession As New NotesSession
+	Dim oDB As NotesDatabase
+	Dim oProfileDoc As NotesDocument
+	
+	Dim servername As String
+	Dim pathname As String
+	Dim filename As String
+	Dim pathfilename As String
+	
+	Set oDb = oSession.CurrentDatabase
+	Set oProfileDoc = oDb.GetProfileDocument("frmProfileDB")
+	
+	
+	
+	servername = oProfileDoc.GetItemValue("fldServer")(0)
+	pathname = oProfileDoc.GetItemValue("fldDirS")(0)
+	filename = oProfileDoc.GetItemValue("fldfileCsvST")(0)
+	
+	pathfilename = servername +  pathname +  filename
+
+	GetFileName = pathfilename
+End Function
+
+
+Function GetBackupPathname() As String
+	Dim oSession As New NotesSession
+	Dim oDB As NotesDatabase
+	Dim oProfileDoc As NotesDocument
+	
+	Dim pathname As String
+	
+	Set oDb = oSession.CurrentDatabase
+	Set oProfileDoc = oDb.GetProfileDocument("frmProfileDB")
+	
+	pathname = oProfileDoc.GetItemValue("fldDirectoryBackup_SU")(0)
+	
+	GetBackupPathname = pathname
+End Function
+Function ReadFileAndFillFieldArray(countRecs As Integer,arrayOfRecs() As RecType, pathfilename  As String) As Boolean
+	On Error Goto error_handling
+	
+	
+	Dim ze As String
+	Dim fileNum As Integer
+	Dim i As Integer
+	Dim hStr As String
+	
+	ReadFileAndFillFieldArray = True
+	
+	If Dir$(pathfilename, 0) = "" Then
+				ReadFileAndFillFieldArray=False
+	Else	
+		
+		fileNum% = Freefile()
+		countRecs% = 0
+		Open  pathfilename For Input As fileNum%
+		If  Not Eof(fileNum%) Then
+			
+		End If
+		Do While Not Eof(fileNum%)
+			Line Input #fileNum%, ze$
+			'------------------------
+			
+			If (Trim(ze) <> "")		
+				
+				
+				Redim Preserve arrayOfRecs(countRecs%)
+				arrayOfRecs(countRecs%).ML = Trim(DetermineValue(ze))
+				arrayOfRecs(countRecs%).PL = Trim(DetermineValue(ze))
+				arrayOfRecs(countRecs%).MLS = Trim(DetermineValue(ze))
+				countRecs% = countRecs% + 1
+			End If
+			
+		Loop
+		
+		Close fileNum%	
+	End If
+ende:
+	Exit Function
+error_handling:
+		Print "ReadFileAndFillFieldArray: ERL: " & Cstr(Erl) & " - ERR: " & Cstr(Err) & " - ERROR: " & Error
+	Resume ende
+	
+End Function
+
+Function DetermineValue(restTxt As String) As String
+	Dim pos As Integer
+	Dim hValue As String	
+	'------------------------
+	
+	pos = InStr(restTxt,",")
+	
+	'--------------------------	
+	If pos >0 Then
+		hValue = Mid(restTxt,1,pos-1)
+	Else
+		hValue = restTxt
+	End If
+	restTxt = Right(restTxt,Len(restTxt) -pos)
+	
+	DetermineValue= Trim(hValue)
+End Function
+Function GetBackupFilename(FileNameImport As String) As String	
+	Dim prefix As String
+	Dim filename As String
+	
+	prefix = Year(Now) & "_" & Format(Month(Now),"00") & "_" & Format(Day(Now),"00")  & "_" & Format(Hour(Now),"00") & "_" & Format(Minute(Now),"00")
+	filename = prefix + "_" +FileNameImport
+	
+	GetBackupFilename = filename
+End Function
