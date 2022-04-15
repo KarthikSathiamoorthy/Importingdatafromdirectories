@@ -1,5 +1,4 @@
 # Importingdatafromdirectories
-how to install the asset , how to use the Asset , Next steps for this Asset.
 This code is written in Lotus notes domino programming language. we should require nsf file which has client requirement to import any data from a file placed in a directory.
 Requirements: We need profile document which defines the directory or the location where the file is placed.  directory or the location where the BACKUP file should be placed. Archive db path if the archive db path is called, this code won't execute. 
 The code should be placed in the agent design. 
